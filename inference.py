@@ -1,16 +1,13 @@
-import torch
-from PIL import Image
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor
-from diffusers import AutoencoderKL, UNet2DConditionModel, LMSDiscreteScheduler
-from tqdm import tqdm
 import numpy as np
+import torch
+from diffusers import AutoencoderKL, LMSDiscreteScheduler, UNet2DConditionModel
+from PIL import Image
+from tqdm import tqdm
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 
 class StableDiffusion:
-    def __init__(self, height=256, width=256):
-        self.height = height
-        self.width = width
-        
+    def __init__(self):
         self.vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="vae")
 
         self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
@@ -36,9 +33,12 @@ class StableDiffusion:
             return self.text_encoder(tokens.input_ids.to(self.device))[0]
         
     def encode_image(self, image):
+        # Encode image using clip to get size of [1, 50, 768]
         processor = CLIPImageProcessor()
-        image = processor(image).unsqueeze(0).to(self.device)
-        return self.vae.encode(image).to(self.device)
+        image = processor(image).to(self.device)
+        with torch.no_grad():
+            return self.text_encoder(image)[0]
+        
     
     def decode(self, latents):
         latents = 1 / 0.18215 * latents
@@ -47,16 +47,18 @@ class StableDiffusion:
     def set_seed(self, seed):
         return torch.manual_seed(seed)
     
-    def get_latent(self, seed, batch_size=1):
-        return torch.randn((batch_size, self.unet.in_channels, self.height // 8, self.width // 8), generator=seed).to(self.device)
+    def get_latent(self, seed, height, width, batch_size=1):
+        return torch.randn((batch_size, self.unet.in_channels, height // 8, width // 8), generator=seed).to(self.device)
     
-    
-    def generate(self, prompt, batch_size=1, steps=25, guidance_scale=7.5, seed=42):
-        seed = self.set_seed(seed)
-        latents = self.get_latent(seed)
+    def get_text_embedding(self, prompt, batch_size):
         text_embedding = self.encode_text([prompt])
         text_embedding_unconditional = self.encode_text([""] * batch_size)
-        text_embeddings = torch.cat([text_embedding_unconditional, text_embedding])
+        return torch.cat([text_embedding_unconditional, text_embedding])
+    
+    def generate(self, prompt, height=512, width=512, batch_size=1, steps=25, guidance_scale=7.5, seed=42):
+        seed = self.set_seed(seed)
+        latents = self.get_latent(seed, height, width)
+        text_embeddings = self.get_text_embedding(prompt, batch_size)
         
         self.scheduler.set_timesteps(steps)
         latents = latents * self.scheduler.init_noise_sigma
@@ -75,7 +77,7 @@ class StableDiffusion:
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
             
-        return self.decode(latents)
+        return latents
     
     def show(self, image):
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -83,12 +85,14 @@ class StableDiffusion:
         images = (image * 255).round().astype("uint8")
         pil_images = [Image.fromarray(image) for image in images]
         return pil_images    
+   
 
 
 if __name__ == "__main__":
     model = StableDiffusion()
-    model.to_device()
-    prompt = "A photo of a cat"
-    image = model.generate(prompt)
+    prompt = "A dream of a distant galaxy, concept art"
+    latent = model.generate(prompt, height=512, width=512, seed=221, steps=50)
+    image = model.decode(latent)
     model.show(image)[0]
+
             
